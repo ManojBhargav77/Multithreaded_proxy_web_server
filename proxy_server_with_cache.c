@@ -1,4 +1,6 @@
-/* Windows-compatible Multi-Threaded Proxy with Cache
+/* Multithreaded HTTP Proxy Server with LRU Cache
+ * Author: Naguru Sai Manoj Bhargav
+ * Windows-compatible Multi-Threaded Proxy with Cache
  * This version keeps pthreads/semaphores (for MinGW/MSYS2).
  * Sockets are adapted for Winsock2.
  */
@@ -50,6 +52,7 @@ struct cache_element{
     cache_element* next;
 };
 
+int get_cache_copy(char* url, char** out_data, int* out_len);
 cache_element* find(char* url);
 int add_cache_element(char* data,int size,char* url);
 void remove_cache_element();
@@ -216,7 +219,7 @@ static int handle_request(sock_t clientSocket, ParsedRequest *request, char *tem
 	} 
 	temp_buffer[temp_buffer_index]='\0';
 	free(buf);
-	add_cache_element(temp_buffer, (int)strlen(temp_buffer), tempReq);
+	add_cache_element(temp_buffer, temp_buffer_index, tempReq);
 	free(temp_buffer);
 	
  	close(remoteSocketID);
@@ -260,20 +263,23 @@ static void* thread_fn(void* socketNew)
 	memcpy(tempReq, buffer, strlen(buffer));
 	tempReq[strlen(buffer)] = '\0';
 	
-	struct cache_element* temp = find(tempReq);
+	char *cached_data = NULL;
+	int cached_len = 0;
+	int cache_hit = get_cache_copy(tempReq, &cached_data, &cached_len);
 
-	if( temp != NULL){
-		int size=temp->len;
+	if( cache_hit && cached_data != NULL ){
+		int size = cached_len;
 		int pos=0;
 		char response[MAX_BYTES];
 		while(pos<size){
 			int chunk = (size - pos) > MAX_BYTES ? MAX_BYTES : (size - pos);
 			bzero(response,MAX_BYTES);
-			memcpy(response, temp->data + pos, (size_t)chunk);
+			memcpy(response, cached_data + pos, (size_t)chunk);
 			send(socketId,response,chunk,0);
 			pos += chunk;
 		}
 		printf("Data retrieved from the Cache\n");
+		free(cached_data);
 	}
 	else if(bytes_recv_client > 0)
 	{
@@ -297,7 +303,8 @@ static void* thread_fn(void* socketNew)
 			}
             else
             {
-                printf("This code doesn't support any method other than GET\n");
+                printf("This proxy only supports GET requests\n");
+                sendErrorMessage(socketId, 501);
             }
 		}
 		ParsedRequest_destroy(request);
@@ -425,74 +432,107 @@ int main(int argc, char * argv[]) {
  	return 0;
 }
 
-cache_element* find(char* url){
-    cache_element* site=NULL;
+int get_cache_copy(char* url, char** out_data, int* out_len) {
     pthread_mutex_lock(&lock);
-    if(head!=NULL){
-        site = head;
-        while (site!=NULL)
-        {
-            if(!strcmp(site->url,url)){
-                site->lru_time_track = time(NULL);
-                break;
+    cache_element* site = head;
+    while (site != NULL) {
+        if (!strcmp(site->url, url)) {
+            site->lru_time_track = time(NULL);
+            *out_len = site->len;
+            *out_data = (char*)malloc(site->len);
+            if (*out_data) {
+                memcpy(*out_data, site->data, site->len);
             }
-            site=site->next;
-        }       
+            pthread_mutex_unlock(&lock);
+            return (*out_data != NULL) ? 1 : 0;
+        }
+        site = site->next;
+    }
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
+
+cache_element* find(char* url) {
+    pthread_mutex_lock(&lock);
+    cache_element* site = head;
+    while (site != NULL) {
+        if (!strcmp(site->url, url)) {
+            site->lru_time_track = time(NULL);
+            break;
+        }
+        site = site->next;
     }
     pthread_mutex_unlock(&lock);
     return site;
 }
 
-void remove_cache_element(){
-    cache_element * p ;
-	cache_element * q ;
-	cache_element * temp;
+static void remove_cache_element_locked() {
+    cache_element * p;
+    cache_element * q;
+    cache_element * temp;
+    if (head != NULL) {
+        for (q = head, p = head, temp = head; q->next != NULL; q = q->next) {
+            if (((q->next)->lru_time_track) < (temp->lru_time_track)) {
+                temp = q->next;
+                p = q;
+            }
+        }
+        if (temp == head) {
+            head = head->next;
+        } else {
+            p->next = temp->next;
+        }
+        cache_size -= ((temp->len) + (int)sizeof(cache_element) + (int)strlen(temp->url) + 1);
+        free(temp->data);
+        free(temp->url);
+        free(temp);
+    }
+}
+
+void remove_cache_element() {
     pthread_mutex_lock(&lock);
-	if( head != NULL) { 
-		for (q = head, p = head, temp =head ; q -> next != NULL; 
-			q = q -> next) {
-			if(( (q -> next) -> lru_time_track) < (temp -> lru_time_track)) {
-				temp = q -> next;
-				p = q;
-			}
-		}
-		if(temp == head) { 
-			head = head -> next;
-		} else {
-			p->next = temp->next;	
-		}
-		cache_size = cache_size - (temp -> len) - (int)sizeof(cache_element) - 
-		(int)strlen(temp -> url) - 1;
-		free(temp->data);     		
-		free(temp->url);
-		free(temp);
-	} 
+    remove_cache_element_locked();
     pthread_mutex_unlock(&lock);
 }
 
-int add_cache_element(char* data,int size,char* url){
+int add_cache_element(char* data, int size, char* url) {
     pthread_mutex_lock(&lock);
-    int element_size=size+1+(int)strlen(url)+(int)sizeof(cache_element);
-    if(element_size>MAX_ELEMENT_SIZE){
+    int element_size = size + 1 + (int)strlen(url) + (int)sizeof(cache_element);
+    if (element_size > MAX_ELEMENT_SIZE) {
         pthread_mutex_unlock(&lock);
         return 0;
     }
-    else
-    {   while(cache_size+element_size>MAX_SIZE){
-            remove_cache_element();
-        }
-        cache_element* element = (cache_element*) malloc(sizeof(cache_element));
-        element->data= (char*)malloc(size+1);
-		strcpy(element->data,data); 
-        element -> url = (char*)malloc(1+( strlen( url )));
-		strcpy( element -> url, url );
-		element->lru_time_track=time(NULL);
-        element->next=head; 
-        element->len=size;
-        head=element;
-        cache_size+=element_size;
-        pthread_mutex_unlock(&lock);
-        return 1;
+
+    while (cache_size + element_size > MAX_SIZE && head != NULL) {
+        remove_cache_element_locked();
     }
-    return 0;
+
+    cache_element* element = (cache_element*) malloc(sizeof(cache_element));
+    if (!element) {
+        pthread_mutex_unlock(&lock);
+        return 0;
+    }
+    element->data = (char*)malloc(size);
+    if (!element->data) {
+        free(element);
+        pthread_mutex_unlock(&lock);
+        return 0;
+    }
+    memcpy(element->data, data, size);
+
+    element->url = (char*)malloc(strlen(url) + 1);
+    if (!element->url) {
+        free(element->data);
+        free(element);
+        pthread_mutex_unlock(&lock);
+        return 0;
+    }
+    strcpy(element->url, url);
+    element->lru_time_track = time(NULL);
+    element->next = head;
+    element->len = size;
+    head = element;
+    cache_size += element_size;
+    pthread_mutex_unlock(&lock);
+    return 1;
 }

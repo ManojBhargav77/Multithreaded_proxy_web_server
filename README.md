@@ -1,5 +1,73 @@
-Multi-Threaded Proxy Web Server with Cache : 
+# Multithreaded HTTP Proxy Web Server with LRU Cache
 
-This project implements a Multi-Threaded Proxy Server with Cache. The proxy acts as an intermediary between clients and web servers, improving efficiency and enabling functionali- ties such as caching, access restriction, and client anonymity. The main focus of this project is on concurrency management using multi-threading, synchronization with semaphores, and cache design using the Least Recently Used (LRU) algorithm.
+A high-performance multithreaded HTTP forward proxy server in C with an in-memory Least Recently Used (LRU) cache, concurrency controls, and POSIX thread synchronization.
 
+**Author:** [Naguru Sai Manoj Bhargav](https://github.com/ManojBhargav77)  
+**Repository:** [github.com/ManojBhargav77/Multithreaded_proxy_web_server](https://github.com/ManojBhargav77/Multithreaded_proxy_web_server)
 
+---
+
+## 🌟 Key Features
+
+- **Multithreaded Concurrency:** Spawns worker threads (`pthread_create`) to handle simultaneous client connections, regulated by a counting semaphore (`sem_wait` / `sem_post`) to cap maximum concurrent connections at 400.
+- **LRU Cache Implementation:** In-memory caching with eviction based on timestamps (`lru_time_track`), supporting up to 200 MB total cache budget and 10 MB per individual cache element.
+- **Thread Safety & Race Elimination:**
+  - **Deadlock Prevention:** Internal lock-free eviction helper (`remove_cache_element_locked`) ensures that eviction triggered inside `add_cache_element()` does not re-acquire the non-recursive mutex `lock`.
+  - **Use-After-Free Elimination:** Cache lookups make an isolated memory copy of the payload under the lock before returning to the calling thread (`get_cache_copy`), ensuring that concurrent evictions cannot free buffer memory during transmission.
+- **Binary-Safe Caching:** Allocates exact byte buffers and copies responses using `memcpy` rather than null-terminated string functions (`strcpy`), preserving compressed assets (gzip), images, and binaries without truncation.
+- **HTTP/1.0 and HTTP/1.1 Parsing:** Origin-form request rewriting, header extraction, and 501 Not Implemented response generation for unsupported HTTP verbs.
+- **Cross-Platform Compatibility:** Supports Linux/macOS and Windows (via Winsock2 socket layer abstraction).
+
+---
+
+## 🛠️ Build and Run
+
+### On Linux / WSL:
+```bash
+gcc -o proxy proxy_server_with_cache.c proxy_parse.c -lpthread
+./proxy 8080
+```
+
+### On Windows (MinGW/MSYS2):
+```bash
+gcc -o proxy.exe proxy_server_with_cache.c proxy_parse.c -lpthread -lws2_32
+./proxy.exe 8080
+```
+
+### Testing with curl:
+```bash
+# First request: Cache miss (fetches from origin and stores in cache)
+curl -x http://localhost:8080 http://example.com/
+
+# Second request: Cache hit (served directly from in-memory LRU cache)
+curl -x http://localhost:8080 http://example.com/
+```
+
+---
+
+## 🏗️ Architecture & Request Lifecycle
+
+```
+Client (curl / browser)
+       │ (1) GET http://example.com/
+       ▼
+Proxy Listener (:8080)
+       │ accept() connection
+       ▼
+Worker Thread (thread_fn) ── sem_wait()
+       │
+       ├── Cache Lookup: get_cache_copy(req)
+       │      ├── HIT: Stream cached bytes in 4KB chunks ──► Client
+       │      └── MISS:
+       │            ├── Parse and validate HTTP headers (proxy_parse)
+       │            ├── DNS resolution (gethostbyname) & TCP connect
+       │            ├── Stream response back to client
+       │            └── Store in LRU cache (add_cache_element)
+       │
+       └── Cleanup: shutdown(), close(), sem_post()
+```
+
+---
+
+## 📜 License
+This project is licensed under the [MIT License](LICENSE).

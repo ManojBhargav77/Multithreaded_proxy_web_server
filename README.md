@@ -7,6 +7,20 @@ A high-performance multithreaded HTTP forward proxy server in C with an in-memor
 
 ---
 
+## 👥 Credits and My Changes
+
+This repository builds upon an open-source multithreaded HTTP proxy server and request parser implementation.
+
+### My Contributions & Bug Fixes (Naguru Sai Manoj Bhargav):
+1. **Resolved Cache Self-Deadlock:** Fixed a critical recursive lock failure in dd_cache_element(). The original code called 
+emove_cache_element() (which locked lock a second time on the same thread) while already holding lock, permanently hanging the proxy once cache capacity reached 200 MB. Re-architected eviction with an internal lock-free helper (
+emove_cache_element_locked()).
+2. **Eliminated Use-After-Free Race Condition:** In the original code, ind() returned a pointer to an element after releasing the mutex, allowing a concurrent eviction to free the element while another thread was transmitting 	emp->data. Replaced with get_cache_copy() to safely clone response bytes under the mutex before transmission.
+3. **Binary-Safe Response Caching:** Replaced strlen and strcpy with 	emp_buffer_index and memcpy so binary payloads (gzip, images, PDFs) are cached without truncation on null bytes.
+4. **Added HTTP 501 Responses:** Returned standard 501 Not Implemented status codes for non-GET methods instead of dropping connections silently.
+
+---
+
 ## 🌟 Key Features
 
 - **Multithreaded Concurrency:** Spawns worker threads (`pthread_create`) to handle simultaneous client connections, regulated by a counting semaphore (`sem_wait` / `sem_post`) to cap maximum concurrent connections at 400.

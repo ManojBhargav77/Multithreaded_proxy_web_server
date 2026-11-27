@@ -1,5 +1,6 @@
 /* Multithreaded HTTP Proxy Server with LRU Cache
- * Author: Naguru Sai Manoj Bhargav
+ * Extended & Maintained by: Naguru Sai Manoj Bhargav (2026)
+ * Based on open-source implementation
  * Windows-compatible Multi-Threaded Proxy with Cache
  * This version keeps pthreads/semaphores (for MinGW/MSYS2).
  * Sockets are adapted for Winsock2.
